@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 # Deep Learning Homework 1
-
 import argparse
 import time
 import pickle
@@ -111,11 +110,40 @@ class LogisticRegression(LinearModel):
         # Loss
         loss = -np.sum(y_i_one_hot * np.log(predicted_probs))
         return loss
+    
+class PCAFeatures:
+    """PCA-based feature transformation using SVD."""
+    def __init__(self, n_components):
+        self.n_components = n_components
+        self.mean = None
+        self.U_K = None
+        self.explained_variance_ratio = None
+        
+    def fit(self, X):
+        self.mean = np.mean(X, axis=0)
+        X_centered = X - self.mean
+        U, S, Vt = np.linalg.svd(X_centered.T, full_matrices=False)
+        self.U_K = U[:, :self.n_components]
+        total_variance = np.sum(S ** 2)
+        explained_variance = np.sum(S[:self.n_components] ** 2)
+        self.explained_variance_ratio = explained_variance / total_variance
+        return self
+    
+    def transform(self, X):
+        if self.mean is None or self.U_K is None:
+            raise ValueError("PCA must be fitted before transform")
+        X_centered = X - self.mean
+        return X_centered @ self.U_K
+    
+    def fit_transform(self, X):
+        self.fit(X)
+        return self.transform(X)
 
 def run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classes):
     learning_rates = [1e-4, 5e-4, 1e-3]
     penalties = [1e-5, 1e-4]
-    feature_types = ["original"]  # Add "custom" when you implement it
+    feature_types = ["original", "pca"]
+    n_pca_components = 100
     
     results = []
     best_overall = {"valid_acc": 0.0}
@@ -123,9 +151,18 @@ def run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classe
     for lr in learning_rates:
         for lam in penalties:
             for feat in feature_types:
-                # Apply features
+                feat_start = time.time()
                 if feat == "original":
                     X_train_feat, X_valid_feat, X_test_feat = X_train, X_valid, X_test
+                elif feat == "pca":
+                    pca = PCAFeatures(n_components=n_pca_components)
+                    X_train_feat = pca.fit_transform(X_train)
+                    X_valid_feat = pca.transform(X_valid)
+                    X_test_feat = pca.transform(X_test)
+                    print(f"PCA: {X_train.shape[1]} -> {n_pca_components} dims, "
+                          f"explained variance: {pca.explained_variance_ratio:.4f}")
+                
+                feat_time = time.time() - feat_start
                 
                 # Create model
                 model = LogisticRegression(n_classes, X_train_feat.shape[1], 
@@ -134,6 +171,9 @@ def run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classe
                 best_valid = 0.0
                 best_w = None
                 
+                # Time the training
+                train_start = time.time()
+
                 # Train 20 epochs
                 for epoch in range(20):
                     order = np.random.permutation(X_train_feat.shape[0])
@@ -144,16 +184,21 @@ def run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classe
                         best_valid = val_acc
                         best_w = model.W.copy()
                 
+                train_time = time.time() - train_start
+                total_time = feat_time + train_time
+
                 # Test accuracy with best checkpoint
                 model.W = best_w
                 test_acc = model.evaluate(X_test_feat, y_test)
                 
-                print(f"LR={lr}, L2={lam}, Feat={feat} | Valid={best_valid:.4f}, Test={test_acc:.4f}")
+                print(f"LR={lr}, L2={lam}, Feat={feat} | Valid={best_valid:.4f}, Test={test_acc:.4f}, Time={train_time:.2f}s")
                 
                 # Store result
                 config = {
                     "lr": lr, "l2": lam, "features": feat,
-                    "valid_acc": best_valid, "test_acc": test_acc
+                    "valid_acc": best_valid, "test_acc": test_acc,
+                    "train_time_seconds": round(train_time, 2),
+                    "total_time_seconds": round(total_time, 2)
                 }
                 results.append(config)
                 
@@ -162,8 +207,38 @@ def run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classe
                     best_overall = config
     
     # Save to JSON (for homework submission)
-    with open("Q2c-grid-search-results.json", "w") as f:
+    with open("Q1-2c-grid-search-results.json", "w") as f:
         json.dump({"best": best_overall, "all": results}, f, indent=2)
+
+     # Print summary comparison
+    print("\n" + "="*70)
+    print("SUMMARY: Original vs PCA Features")
+    print("="*70)
+    
+    # Calculate average times for each feature type
+    original_times = [r["train_time_seconds"] for r in results if r["features"] == "original"]
+    pca_times = [r["train_time_seconds"] for r in results if r["features"] == "pca"]
+    
+    original_accs = [r["valid_acc"] for r in results if r["features"] == "original"]
+    pca_accs = [r["valid_acc"] for r in results if r["features"] == "pca"]
+    
+    print(f"Original features (784 dims):")
+    print(f"  Avg training time: {np.mean(original_times):.2f}s")
+    print(f"  Avg validation acc: {np.mean(original_accs):.4f}")
+    print(f"  Best validation acc: {np.max(original_accs):.4f}")
+    
+    print(f"\nPCA features (100 dims):")
+    print(f"  Avg training time: {np.mean(pca_times):.2f}s")
+    print(f"  Avg validation acc: {np.mean(pca_accs):.4f}")
+    print(f"  Best validation acc: {np.max(pca_accs):.4f}")
+    
+    speedup = np.mean(original_times) / np.mean(pca_times)
+    acc_diff = np.mean(original_accs) - np.mean(pca_accs)
+    
+    print(f"\nSpeedup: {speedup:.2f}x faster")
+    print(f"Accuracy difference: {acc_diff:.4f} ({acc_diff*100:.2f}%)")
+    print("="*70)
+    
     
     print(f"\nBest config: LR={best_overall['lr']}, L2={best_overall['l2']}, "
           f"Features={best_overall['features']}, Test={best_overall['test_acc']:.4f}")
@@ -309,12 +384,20 @@ def main(args):
     n_feats = X_train.shape[1]
 
     # initialize the model
-    model = Perceptron(n_classes, n_feats)
+    if args.model == 'perceptron':
+        model = Perceptron(n_classes, n_feats)
+    elif args.model == 'logistic_regression':
+        model = LogisticRegression(n_classes, n_feats, 
+                                learning_rate=args.learning_rate,
+                                reg_lambda=args.reg_lambda)
+    elif args.model == 'mlp':
+        model = MLP(n_classes, n_feats, args.hidden_size)
 
     epochs = np.arange(1, args.epochs + 1)
 
     valid_accs = []
     train_accs = []
+    train_losses = []
 
     start = time.time()
 
@@ -326,7 +409,11 @@ def main(args):
         X_train = X_train[train_order]
         y_train = y_train[train_order]
 
-        model.train_epoch(X_train, y_train)
+        if args.model == 'mlp':
+            train_loss = model.train_epoch(X_train, y_train, learning_rate=args.learning_rate)
+            train_losses.append(train_loss)
+        else:
+            model.train_epoch(X_train, y_train)
 
         train_acc = model.evaluate(X_train, y_train)
         valid_acc = model.evaluate(X_valid, y_valid)
@@ -334,7 +421,11 @@ def main(args):
         train_accs.append(train_acc)
         valid_accs.append(valid_acc)
 
-        print('train acc: {:.4f} | val acc: {:.4f}'.format(train_acc, valid_acc))
+        if args.model == 'mlp':
+            print('train acc: {:.4f} | val acc: {:.4f} | train loss: {:.4f}'.format(
+            train_acc, valid_acc, train_loss))
+        else:
+            print('train acc: {:.4f} | val acc: {:.4f}'.format(train_acc, valid_acc))
 
         # Todo: Q1(a)
         # Decide whether to save the model to args.save_path based on its
@@ -350,16 +441,31 @@ def main(args):
     print('Training took {} minutes and {} seconds'.format(minutes, seconds))
 
     print("Reloading best checkpoint")
-    best_model = Perceptron.load(args.save_path)
+    if args.model == 'perceptron':
+        best_model = Perceptron.load(args.save_path)
+    elif args.model == 'logistic_regression':
+        best_model = LogisticRegression.load(args.save_path)
+    elif args.model == 'mlp':
+        best_model = MLP.load(args.save_path)
     test_acc = best_model.evaluate(X_test, y_test)
 
     print('Best model test acc: {:.4f}'.format(test_acc))
 
+    # Plot accuracies
     utils.plot(
         "Epoch", "Accuracy",
         {"train": (epochs, train_accs), "valid": (epochs, valid_accs)},
         filename=args.accuracy_plot
     )
+    
+    # Plot training loss separately for MLP
+    if args.model == 'mlp':
+        loss_plot_filename = args.accuracy_plot.replace('.pdf', '-loss.pdf')
+        utils.plot(
+            "Epoch", "Training Loss",
+            {"train_loss": (epochs, train_losses)},
+            filename=loss_plot_filename
+        )
 
     with open(args.scores, "w") as f:
         json.dump(
@@ -374,12 +480,37 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='perceptron',
+                    choices=['perceptron', 'logistic_regression', 'mlp'],
+                    help="""Which model to train""")
+    parser.add_argument('--hidden-size', type=int, default=100)
     parser.add_argument('--epochs', default=20, type=int,
                         help="""Number of epochs to train for.""")
     parser.add_argument('--data-path', type=str, default="emnist-letters.npz")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save-path", required=True)
-    parser.add_argument("--accuracy-plot", default="Q1-perceptron-accs.pdf")
-    parser.add_argument("--scores", default="Q1-perceptron-scores.json")
+    parser.add_argument("--save-path", default=None)
+    parser.add_argument("--accuracy-plot", default=None)
+    parser.add_argument("--scores", default=None)
+    parser.add_argument('--learning-rate', type=float, default=0.0001,
+                    help="""Learning rate for logistic regression""")
+    parser.add_argument('--reg-lambda', type=float, default=0.00001,
+                    help="""L2 regularization penalty for logistic regression""")
+    parser.add_argument('--grid-search', action='store_true')
     args = parser.parse_args()
-    main(args)
+    if args.accuracy_plot is None:
+        args.accuracy_plot = f"Q1-{args.model}-accs.pdf"
+    if args.scores is None:
+        args.scores = f"Q1-{args.model}-scores.json"
+    if args.save_path is None:
+        args.save_path = f"Q1-{args.model}-best.pkl"
+
+    if args.grid_search:
+        utils.configure_seed(seed=args.seed)
+        data = utils.load_dataset(data_path=args.data_path, bias=True)
+        X_train, y_train = data["train"]
+        X_valid, y_valid = data["dev"]
+        X_test, y_test = data["test"]
+        n_classes = np.unique(y_train).size
+        run_grid_search(X_train, y_train, X_valid, y_valid, X_test, y_test, n_classes)
+    else:
+        main(args)
