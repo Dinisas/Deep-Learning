@@ -15,6 +15,7 @@ from utils import (
 
 # Set device
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
 configure_seed(42)
 
@@ -157,18 +158,57 @@ def evaluate(model,loader, criterion):
     
     return avg_loss, correlation.item()
 
-def main():
-    #model type
-    model_type = 'vanilla'
+def grid_search():
+    """Perform grid search over hyperparameters."""
+    
+    # Define hyperparameter grid
+    param_grid = {
+        'model_type': ['lstm', 'gru'],
+        'hidden_size': [64, 128],
+        'num_layers': [2, 3],
+        'dropout': [0.2, 0.3],
+        'learning_rate': [0.001, 0.0005],
+    }
+    
+    # Generate all combinations
+    import itertools
+    keys = param_grid.keys()
+    values = param_grid.values()
+    combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    
+    print(f"Testing {len(combinations)} configurations...\n")
+    
+    all_results = []
+    
+    for idx, params in enumerate(combinations, 1):
+        print(f"[{idx}/{len(combinations)}] {params['model_type'].upper()} h={params['hidden_size']} l={params['num_layers']} d={params['dropout']} lr={params['learning_rate']}")
+        
+        # Call your existing main with these params
+        result = main(
+            model_type=params['model_type'],
+            hidden_size=params['hidden_size'],
+            num_layers=params['num_layers'],
+            dropout=params['dropout'],
+            learning_rate=params['learning_rate']
+        )
+        
+        result['params'] = params
+        all_results.append(result)
+        print(f"  → Best Val Corr: {result['best_val_corr']:.4f}\n")
+    
+    # Sort and show best
+    sorted_results = sorted(all_results, key=lambda x: x['best_val_corr'], reverse=True)
+    
+    print("\n" + "="*60)
+    print("TOP 5 CONFIGURATIONS")
+    print("="*60)
+    for i, r in enumerate(sorted_results[:5], 1):
+        p = r['params']
+        print(f"{i}. {p['model_type'].upper()} h={p['hidden_size']} l={p['num_layers']} d={p['dropout']} lr={p['learning_rate']} → {r['best_val_corr']:.4f}")
+    
+    return sorted_results
 
-    # Hyperparameters
-    batch_size = 64
-    epochs = 50
-    learning_rate = 0.001
-    hidden_size = 64
-    num_layers = 2
-    dropout = 0.2
-
+def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_rate=0.001, batch_size=64, epochs=50):
     #Load data
     train_dataset = load_rnacompete_data('RBFOX1', split='train')
     val_dataset = load_rnacompete_data('RBFOX1', split='val')
@@ -282,5 +322,22 @@ def main():
         'best_val_corr': best_val_corr,
     }
 
-if __name__ == "__main__":
-    results=main()
+if __name__ == '__main__':
+    # Run grid search
+    all_results = grid_search()
+    
+    # Train final models with best config
+    best_params = all_results[0]['params']
+    print("\n" + "="*60)
+    print("FINAL TRAINING WITH BEST CONFIG")
+    print("="*60)
+    
+    for model_type in ['lstm', 'gru']:
+        print(f"\nFinal {model_type.upper()} training...")
+        final_result = main(
+            model_type=model_type,
+            hidden_size=best_params['hidden_size'],
+            num_layers=best_params['num_layers'],
+            dropout=best_params['dropout'],
+            learning_rate=best_params['learning_rate']
+        )
