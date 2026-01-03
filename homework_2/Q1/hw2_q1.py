@@ -15,6 +15,7 @@ from sklearn.metrics import accuracy_score
 import time
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
 # Data Loading
 data_flag = 'bloodmnist'
@@ -156,25 +157,29 @@ def main(use_maxpool=False, use_softmax=False):
     ### you can use the code below or implement your own loop ###
     train_losses = []
     val_accs = []
-    test_accs = []
+    best_val_acc = 0.0
+    best_epoch = 0
+    best_model_state = None
     for epoch in range(epochs):
 
         epoch_start = time.time()
 
         train_loss = train_epoch(train_loader, model, criterion, optimizer)
         val_acc = evaluate(val_loader, model)
-        test_acc = evaluate(test_loader, model)
 
         train_losses.append(train_loss)
         val_accs.append(val_acc)
-        test_accs.append(test_acc)
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch
+            best_model_state = model.state_dict().copy()
 
         epoch_end = time.time()
         epoch_time = epoch_end - epoch_start
 
         print(f"Epoch {epoch+1}/{epochs} | "
             f"Loss: {train_loss:.4f} | Val Acc: {val_acc:.4f} | "
-            f"Test Acc: {test_acc:.4f} | "
             f"Time: {epoch_time:.2f} sec")
 
     #Test Accuracy
@@ -182,11 +187,16 @@ def main(use_maxpool=False, use_softmax=False):
     # print("Test Accuracy:", test_acc)
     # test_accs.append(test_acc)
 
+    print(f"\nBest validation accuracy: {best_val_acc:.4f} at epoch {best_epoch+1}")
+    model.load_state_dict(best_model_state)
+    test_acc = evaluate(test_loader, model)
+    print(f"Test accuracy (best val model): {test_acc:.4f}")
+
     config = f"maxpool{use_maxpool}_softmax{use_softmax}"
 
     #Save the model
-    torch.save(model.state_dict(), "bloodmnist_cnn_{config}.pth")
-    print("Model saved as bloodmnist_cnn_{config}.pth")
+    torch.save(best_model_state, f"bloodmnist_cnn_{config}.pth")
+    print(f"Model saved as bloodmnist_cnn_{config}.pth")
 
     # --------- After Training ----------
     total_end = time.time()
@@ -199,7 +209,6 @@ def main(use_maxpool=False, use_softmax=False):
 
     plot(epochs_list, train_losses, ylabel='Loss', name='CNN-training-loss-{}'.format(config))
     plot(epochs_list, val_accs, ylabel='Accuracy', name='CNN-validation-accuracy-{}'.format(config))
-    plot(epochs_list, test_accs, ylabel='Accuracy', name='CNN-test-accuracy-{}'.format(config))
 
     return {
         'train_losses': train_losses,
@@ -208,5 +217,39 @@ def main(use_maxpool=False, use_softmax=False):
         'total_time': total_time,
     }
 
+# if __name__ == '__main__':
+#     results = main(use_maxpool=False, use_softmax=False)
+
 if __name__ == '__main__':
-    results = main(use_maxpool=False, use_softmax=False)
+    print("\n" + "="*60)
+    print("QUESTION 1.1: WITHOUT MaxPooling")
+    print("="*60)
+    
+    # Q1.1a: Logits (without softmax)
+    print("\n--- Experiment: Logits ---")
+    results_logits = main(use_maxpool=False, use_softmax=False)
+    
+    # Q1.1b: Softmax
+    print("\n--- Experiment: Softmax ---")
+    results_softmax = main(use_maxpool=False, use_softmax=True)
+    
+    print("\n" + "="*60)
+    print("QUESTION 1.2: WITH MaxPooling")
+    print("="*60)
+    
+    # Q1.2a: Logits + MaxPool
+    print("\n--- Experiment: Logits + MaxPool ---")
+    results_logits_maxpool = main(use_maxpool=True, use_softmax=False)
+    
+    # Q1.2b: Softmax + MaxPool
+    print("\n--- Experiment: Softmax + MaxPool ---")
+    results_softmax_maxpool = main(use_maxpool=True, use_softmax=True)
+    
+    # Summary
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(f"\nQ1.1 Logits:           Test Acc = {results_logits['test_acc']:.4f}")
+    print(f"Q1.1 Softmax:          Test Acc = {results_softmax['test_acc']:.4f}")
+    print(f"Q1.2 Logits + MaxPool: Test Acc = {results_logits_maxpool['test_acc']:.4f}")
+    print(f"Q1.2 Softmax + MaxPool: Test Acc = {results_softmax_maxpool['test_acc']:.4f}")
