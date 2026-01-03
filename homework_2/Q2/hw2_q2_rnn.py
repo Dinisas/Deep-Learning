@@ -49,58 +49,120 @@ class vanillaRNN(nn.Module):
         return x
 
 class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, dropout):
+    def __init__(self, input_size, hidden_size, num_layers, dropout, use_attention=False, num_attention_heads=1):
         super(LSTM, self).__init__()
-        self.hidden_size=hidden_size
-        self.num_layers=num_layers
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.use_attention = use_attention
 
-        #LSTM Layer
-        self.lstm=nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        # LSTM Layer
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, 
+                           dropout=dropout if num_layers > 1 else 0)
         
-        #Fully connected layers
-        self.fc1=nn.Linear(in_features=hidden_size, out_features=32)
-        self.relu=nn.ReLU()
-        self.dropout=nn.Dropout(dropout)
-        self.fc2=nn.Linear(in_features=32, out_features=1)
-
-    def forward(self,x):
-        # LSTM forward pass
-        output, (h_n, c_n) = self.lstm(x)
-        last_hidden = h_n[-1]
+        # Optional Attention
+        if use_attention:
+            self.attention = AttentionPooling(hidden_size, num_heads=num_attention_heads)
         
         # Fully connected layers
-        x = self.fc1(last_hidden)
+        self.fc1 = nn.Linear(in_features=hidden_size, out_features=32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(in_features=32, out_features=1)
+
+    def forward(self, x):
+        # LSTM forward pass
+        output, (h_n, c_n) = self.lstm(x)
+        
+        # Use attention or last hidden state
+        if self.use_attention:
+            pooled = self.attention(output)
+        else:
+            pooled = h_n[-1]
+        
+        # Fully connected layers
+        x = self.fc1(pooled)
         x = self.relu(x)
         x = self.dropout(x)
         x = self.fc2(x)
         return x
     
 class GRU(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, dropout):
+    def __init__(self, input_size, hidden_size, num_layers, dropout, use_attention=False, num_attention_heads=1):
         super(GRU, self).__init__()
-        self.hidden_size=hidden_size
-        self.num_layers=num_layers
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.use_attention = use_attention
 
-        #GRU Layer
-        self.gru=nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        # GRU Layer
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, 
+                         dropout=dropout if num_layers > 1 else 0)
         
-        #Fully connected layers
-        self.fc1=nn.Linear(in_features=hidden_size, out_features=32)
-        self.relu=nn.ReLU()
-        self.dropout=nn.Dropout(dropout)
-        self.fc2=nn.Linear(in_features=32, out_features=1)
-
-    def forward(self,x):
-        # GRU forward pass
-        output, h_n = self.gru(x)
-        last_hidden = h_n[-1]
+        # Optional Attention
+        if use_attention:
+            self.attention = AttentionPooling(hidden_size, num_heads=num_attention_heads)
         
         # Fully connected layers
-        x = self.fc1(last_hidden)
+        self.fc1 = nn.Linear(in_features=hidden_size, out_features=32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(in_features=32, out_features=1)
+
+    def forward(self, x):
+        # GRU forward pass
+        output, h_n = self.gru(x)
+        
+        # Use attention or last hidden state
+        if self.use_attention:
+            pooled = self.attention(output)
+        else:
+            pooled = h_n[-1]
+        
+        # Fully connected layers
+        x = self.fc1(pooled)
         x = self.relu(x)
         x = self.dropout(x)
         x = self.fc2(x)
         return x
+    
+class AttentionPooling(nn.Module):
+    """
+    Attention pooling layer that computes weighted sum of hidden states.
+    """
+    def __init__(self, hidden_size, num_heads=1):
+        super(AttentionPooling, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        
+        if num_heads == 1:
+            self.attention_weights = nn.Linear(hidden_size, 1)
+        else:
+            self.attention_weights = nn.Linear(hidden_size, num_heads)
+            self.output_projection = nn.Linear(hidden_size * num_heads, hidden_size)
+    
+    def forward(self, hidden_states):
+        scores = self.attention_weights(hidden_states)
+        
+        if self.num_heads == 1:
+            scores = scores.squeeze(-1)
+            attention_weights = nn.functional.softmax(scores, dim=1)
+            attended = torch.bmm(
+                attention_weights.unsqueeze(1),
+                hidden_states
+            ).squeeze(1)
+        else:
+            attention_weights = nn.functional.softmax(scores, dim=1)
+            attended_heads = []
+            for head in range(self.num_heads):
+                head_weights = attention_weights[:, :, head]
+                head_attended = torch.bmm(
+                    head_weights.unsqueeze(1),
+                    hidden_states
+                ).squeeze(1)
+                attended_heads.append(head_attended)
+            attended = torch.cat(attended_heads, dim=1)
+            attended = self.output_projection(attended)
+        
+        return attended
 
 #Training Function
 def train_epoch(model,loader, criterion,optimizer):
@@ -208,7 +270,7 @@ def grid_search():
     
     return sorted_results
 
-def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_rate=0.001, batch_size=64, epochs=50):
+def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_rate=0.001, batch_size=64, epochs=50, use_attention=False, num_attention_heads=1):
     #Load data
     train_dataset = load_rnacompete_data('RBFOX1', split='train')
     val_dataset = load_rnacompete_data('RBFOX1', split='val')
@@ -226,13 +288,15 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
             num_layers=num_layers,
             dropout=dropout
         ).to(device)
-    
+
     elif model_type == 'lstm':
         model = LSTM(
             input_size=4,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            dropout=dropout
+            dropout=dropout,
+            use_attention=use_attention,
+            num_attention_heads=num_attention_heads
         ).to(device)
 
     else:
@@ -240,7 +304,9 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
             input_size=4,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            dropout=dropout
+            dropout=dropout,
+            use_attention=use_attention,
+            num_attention_heads=num_attention_heads
         ).to(device)
 
     criterion=masked_mse_loss
@@ -271,7 +337,8 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
         if val_corr > best_val_corr:
             best_val_corr = val_corr
             best_epoch = epoch
-            torch.save(model.state_dict(), f'best_{model_type}_model.pth')
+            attn_suffix = f'_attn{num_attention_heads}h' if use_attention else ''
+            torch.save(model.state_dict(), f'best_{model_type}{attn_suffix}_model.pth')
         
         # Print progress
         if (epoch + 1) % 5 == 0 or epoch == 0:
@@ -283,7 +350,7 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
     print(f"\nBest validation correlation: {best_val_corr:.4f} at epoch {best_epoch+1}")
     
     # Load best model and evaluate on test set
-    model.load_state_dict(torch.load(f'best_{model_type}_model.pth'))
+    model.load_state_dict(torch.load(f'best_{model_type}{attn_suffix}_model.pth'))
     test_loss, test_corr = evaluate(model, test_loader, criterion)
     
     print(f"\n{'='*60}")
@@ -300,7 +367,7 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
     plot(
         epochs_range,
         {'Train Loss': train_losses, 'Val Loss': val_losses},
-        filename=f'{model_type}_losses.pdf'
+        filename=f'{model_type}{attn_suffix}_losses.pdf'
     )
     print(f"Saved: {model_type}_losses.pdf")
     
@@ -308,7 +375,7 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
     plot(
         epochs_range,
         {'Val Spearman Correlation': val_correlations},
-        filename=f'{model_type}_correlation.pdf'
+        filename=f'{model_type}{attn_suffix}_correlation.pdf'
     )
     print(f"Saved: {model_type}_correlation.pdf")
     
@@ -322,22 +389,68 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
         'best_val_corr': best_val_corr,
     }
 
+# if __name__ == '__main__':
+#     # Run grid search
+#     all_results = grid_search()
+    
+#     # Train final models with best config
+#     best_params = all_results[0]['params']
+#     print("\n" + "="*60)
+#     print("FINAL TRAINING WITH BEST CONFIG")
+#     print("="*60)
+    
+#     for model_type in ['lstm', 'gru']:
+#         print(f"\nFinal {model_type.upper()} training...")
+#         final_result = main(
+#             model_type=model_type,
+#             hidden_size=best_params['hidden_size'],
+#             num_layers=best_params['num_layers'],
+#             dropout=best_params['dropout'],
+#             learning_rate=best_params['learning_rate']
+#         )
+
 if __name__ == '__main__':
-    # Run grid search
-    all_results = grid_search()
+    # Best hyperparameters from Question 2.1
+    best_hidden_size = 128
+    best_num_layers = 3
+    best_dropout = 0.2
+    best_lr = 0.001
+    model_to_extend = 'lstm'  # Best model from Q2.1
     
-    # Train final models with best config
-    best_params = all_results[0]['params']
+    # BASELINE: WITHOUT attention
     print("\n" + "="*60)
-    print("FINAL TRAINING WITH BEST CONFIG")
+    print(f"BASELINE: {model_to_extend.upper()} WITHOUT ATTENTION")
     print("="*60)
+    baseline_result = main(
+        model_type=model_to_extend,
+        hidden_size=best_hidden_size,
+        num_layers=best_num_layers,
+        dropout=best_dropout,
+        learning_rate=best_lr,
+        use_attention=False
+    )
     
-    for model_type in ['lstm', 'gru']:
-        print(f"\nFinal {model_type.upper()} training...")
-        final_result = main(
-            model_type=model_type,
-            hidden_size=best_params['hidden_size'],
-            num_layers=best_params['num_layers'],
-            dropout=best_params['dropout'],
-            learning_rate=best_params['learning_rate']
+    # WITH ATTENTION: Try different head counts
+    attention_results = {}
+    for num_heads in [1, 2, 4]:
+        print("\n" + "="*60)
+        print(f"{model_to_extend.upper()} WITH {num_heads} ATTENTION HEAD(S)")
+        print("="*60)
+        result = main(
+            model_type=model_to_extend,
+            hidden_size=best_hidden_size,
+            num_layers=best_num_layers,
+            dropout=best_dropout,
+            learning_rate=best_lr,
+            use_attention=True,
+            num_attention_heads=num_heads
         )
+        attention_results[num_heads] = result
+    
+    # COMPARISON
+    print("\n" + "="*60)
+    print("COMPARISON: BASELINE vs ATTENTION")
+    print("="*60)
+    print(f"Baseline: Val={baseline_result['best_val_corr']:.4f}, Test={baseline_result['test_correlation']:.4f}")
+    for num_heads, result in attention_results.items():
+        print(f"{num_heads} head(s): Val={result['best_val_corr']:.4f}, Test={result['test_correlation']:.4f}")
