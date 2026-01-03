@@ -134,6 +134,7 @@ def plot(epochs, plottable, ylabel='', name=''):
     plt.ylabel(ylabel)
     plt.plot(epochs, plottable)
     plt.savefig('%s.pdf' % (name), bbox_inches='tight')
+    plt.close()
 
 def main(use_maxpool=False, use_softmax=False):
     #Load Data
