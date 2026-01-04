@@ -165,6 +165,129 @@ class AttentionPooling(nn.Module):
 
         return attended
 
+
+class PositionalEncoding(nn.Module):
+    """
+    Positional encoding for Transformer models.
+    Adds positional information to the input embeddings since Transformers
+    have no inherent notion of sequence order.
+    """
+    def __init__(self, d_model, max_len=100, dropout=0.1):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Create positional encoding matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
+
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_len, d_model)
+        """
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
+class TransformerModel(nn.Module):
+    """
+    Transformer Encoder model for RNA binding affinity prediction.
+    Uses self-attention to capture relationships between all positions
+    in the RNA sequence simultaneously.
+    """
+    def __init__(self, input_size, hidden_size, num_layers, dropout,
+                 num_attention_heads=4, dim_feedforward=None, pooling='mean'):
+        super(TransformerModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.pooling = pooling
+
+        # Input projection: project 4-dim one-hot to hidden_size
+        self.input_projection = nn.Linear(input_size, hidden_size)
+
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(hidden_size, max_len=100, dropout=dropout)
+
+        # Transformer Encoder
+        if dim_feedforward is None:
+            dim_feedforward = hidden_size * 4  # Standard transformer uses 4x hidden size
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_attention_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True  # Input shape: (batch, seq, feature)
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers
+        )
+
+        # Layer normalization
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+        # Fully connected layers (same as RNN models)
+        self.fc1 = nn.Linear(in_features=hidden_size, out_features=32)
+        self.relu = nn.ReLU()
+        self.dropout_layer = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(in_features=32, out_features=1)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, 4) - one-hot encoded RNA
+        Returns:
+            output: Tensor of shape (batch_size, 1) - binding affinity prediction
+        """
+        # Project input to hidden dimension
+        x = self.input_projection(x)  # (batch, seq, hidden_size)
+
+        # Add positional encoding
+        x = self.pos_encoder(x)
+
+        # Pass through transformer encoder
+        x = self.transformer_encoder(x)  # (batch, seq, hidden_size)
+
+        # Apply layer normalization
+        x = self.layer_norm(x)
+
+        # Pooling: aggregate sequence into single vector
+        if self.pooling == 'mean':
+            # Mean pooling over sequence dimension
+            pooled = x.mean(dim=1)  # (batch, hidden_size)
+        elif self.pooling == 'max':
+            # Max pooling over sequence dimension
+            pooled = x.max(dim=1)[0]  # (batch, hidden_size)
+        elif self.pooling == 'first':
+            # Use first token (like CLS token in BERT)
+            pooled = x[:, 0, :]  # (batch, hidden_size)
+        elif self.pooling == 'last':
+            # Use last token
+            pooled = x[:, -1, :]  # (batch, hidden_size)
+        else:
+            # Default to mean pooling
+            pooled = x.mean(dim=1)
+
+        # Fully connected layers
+        x = self.fc1(pooled)
+        x = self.relu(x)
+        x = self.dropout_layer(x)
+        x = self.fc2(x)
+
+        return x
+
 #Training Function
 def train_epoch(model,loader, criterion,optimizer):
     model.train()
@@ -302,7 +425,7 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
             num_attention_heads=num_attention_heads
         ).to(device)
 
-    else:
+    elif model_type == 'gru':
         model = GRU(
             input_size=4,
             hidden_size=hidden_size,
@@ -311,6 +434,19 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
             use_attention=use_attention,
             num_attention_heads=num_attention_heads
         ).to(device)
+
+    elif model_type == 'transformer':
+        model = TransformerModel(
+            input_size=4,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            num_attention_heads=num_attention_heads,
+            pooling='mean'  # Can be 'mean', 'max', 'first', or 'last'
+        ).to(device)
+
+    else:
+        raise ValueError(f"Unknown model type: {model_type}. Choose from 'vanilla', 'lstm', 'gru', 'transformer'.")
 
     criterion=masked_mse_loss
     optimizer=optim.Adam(model.parameters(), lr=learning_rate)
@@ -396,27 +532,26 @@ def main(model_type='lstm', hidden_size=64, num_layers=2, dropout=0.2, learning_
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='RNN-based RNA Binding Protein Interaction Prediction (Q2.1 & Q2.2)',
+        description='RNN/Transformer-based RNA Binding Protein Interaction Prediction (Q2.1 & Q2.2)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     # Model architecture arguments
     parser.add_argument('--model_type', type=str, default='lstm',
-                        choices=['vanilla', 'lstm', 'gru'],
-                        help='Type of RNN model to use')
+                        choices=['vanilla', 'lstm', 'gru', 'transformer'],
+                        help='Type of model to use')
     parser.add_argument('--hidden_size', type=int, default=128,
-                        help='Hidden size for RNN layers')
+                        help='Hidden size for model layers')
     parser.add_argument('--num_layers', type=int, default=3,
-                        help='Number of RNN layers')
+                        help='Number of layers (RNN layers or Transformer encoder layers)')
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout probability')
 
-    # Attention arguments (for Q2.2)
+    # Attention arguments (for Q2.2 and Transformer)
     parser.add_argument('--use_attention', action='store_true',
-                        help='Whether to use attention pooling (Q2.2)')
-    parser.add_argument('--num_attention_heads', type=int, default=1,
-                        choices=[1, 2, 4],
-                        help='Number of attention heads')
+                        help='Whether to use attention pooling for RNN models (Q2.2)')
+    parser.add_argument('--num_attention_heads', type=int, default=4,
+                        help='Number of attention heads (for Transformer or attention pooling)')
 
     # Training arguments
     parser.add_argument('--learning_rate', '--lr', type=float, default=0.001,
@@ -433,6 +568,10 @@ def parse_args():
                         choices=['single', 'grid_search', 'attention_comparison'],
                         help='Running mode: single model, grid search, or attention comparison (Q2.2)')
 
+    # CPU optimization flag
+    parser.add_argument('--fast_cpu', action='store_true',
+                        help='Use lighter model settings optimized for CPU (smaller hidden size, fewer layers)')
+
     return parser.parse_args()
 
 
@@ -441,6 +580,20 @@ if __name__ == '__main__':
 
     # Set random seed
     configure_seed(args.seed)
+    
+    # Apply CPU optimizations if requested
+    if args.fast_cpu:
+        print("\n⚡ FAST CPU MODE: Using lighter model settings")
+        if args.model_type == 'transformer':
+            # Transformer-specific optimizations for CPU
+            args.hidden_size = 64
+            args.num_layers = 2
+            args.num_attention_heads = 2
+        else:
+            # RNN optimizations for CPU
+            args.hidden_size = 64
+            args.num_layers = 2
+        args.batch_size = 32  # Smaller batches for CPU
 
     if args.mode == 'single':
         # Train a single model with specified arguments
